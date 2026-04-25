@@ -1,0 +1,226 @@
+blueprint:
+  name: "Batterie-Benachrichtigung"
+  description: >-
+    Überwacht alle Batterie-Sensoren und sendet eine Benachrichtigung wenn
+    Geräte eine niedrige Batterie haben.
+
+    **Platzhalter für die Nachricht:**
+    - `{devices}` – Liste aller betroffenen Geräte mit Batteriestand
+    - `{count}` – Anzahl der Geräte mit leerer Batterie
+
+    **Test-Schaltfläche:** Erstelle unter *Einstellungen → Geräte & Dienste →
+    Helfer → + Helfer erstellen → Schaltfläche* einen Helfer und wähle ihn
+    unten aus, um die Benachrichtigung jederzeit manuell auszulösen.
+  domain: automation
+  homeassistant:
+    min_version: "2023.4.0"
+  input:
+    battery_threshold:
+      name: "Batterieschwelle (%)"
+      description: "Benachrichtigung senden, wenn Batterie unter diesem Wert liegt."
+      default: 20
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+          mode: slider
+
+    excluded_sensors:
+      name: "Ausgeschlossene Sensoren"
+      description: "Diese Batterie-Sensoren werden nicht überwacht (optional)."
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: sensor
+              device_class: battery
+
+    notify_device:
+      name: "Benachrichtigungsgerät"
+      description: >-
+        Mobilgerät mit installierter Home Assistant App, das die
+        Benachrichtigung erhalten soll.
+      selector:
+        device:
+          integration: mobile_app
+
+    notification_title:
+      name: "Benachrichtigungstitel"
+      default: "🔋 Batterie-Warnung"
+      selector:
+        text:
+
+    notification_message:
+      name: "Benachrichtigungstext"
+      description: >-
+        Text der Benachrichtigung. Verwende {devices} für die Geräteliste
+        und {count} für die Anzahl betroffener Geräte.
+      default: "{count} Gerät(e) mit niedriger Batterie: {devices}"
+      selector:
+        text:
+          multiline: true
+
+    check_time:
+      name: "Prüfzeit"
+      description: "Uhrzeit, zu der die Batterien täglich geprüft werden."
+      default: "08:00:00"
+      selector:
+        time:
+
+    check_days:
+      name: "Prüftage"
+      description: "An welchen Wochentagen soll die Prüfung stattfinden?"
+      default:
+        - mon
+        - tue
+        - wed
+        - thu
+        - fri
+        - sat
+        - sun
+      selector:
+        select:
+          multiple: true
+          options:
+            - label: "Montag"
+              value: "mon"
+            - label: "Dienstag"
+              value: "tue"
+            - label: "Mittwoch"
+              value: "wed"
+            - label: "Donnerstag"
+              value: "thu"
+            - label: "Freitag"
+              value: "fri"
+            - label: "Samstag"
+              value: "sat"
+            - label: "Sonntag"
+              value: "sun"
+
+    quiet_hours_enabled:
+      name: "Ruhezeit aktivieren"
+      description: >-
+        Wenn aktiv, werden während der Ruhezeit keine Benachrichtigungen
+        gesendet – auch nicht beim manuellen Test.
+      default: false
+      selector:
+        boolean:
+
+    quiet_start:
+      name: "Ruhezeit Beginn"
+      default: "22:00:00"
+      selector:
+        time:
+
+    quiet_end:
+      name: "Ruhezeit Ende"
+      default: "07:00:00"
+      selector:
+        time:
+
+    test_button:
+      name: "Test-Schaltfläche (optional)"
+      description: >-
+        Helfer vom Typ 'Schaltfläche' zum manuellen Auslösen der Prüfung.
+        Leer lassen, wenn kein Test-Knopf benötigt wird.
+      default: []
+      selector:
+        entity:
+          filter:
+            - domain: input_button
+
+variables:
+  battery_threshold: !input battery_threshold
+  excluded_sensors: !input excluded_sensors
+  notification_message: !input notification_message
+  notification_title: !input notification_title
+  quiet_hours_enabled: !input quiet_hours_enabled
+  quiet_start: !input quiet_start
+  quiet_end: !input quiet_end
+  check_days: !input check_days
+
+trigger:
+  - platform: time
+    at: !input check_time
+    id: "scheduled"
+  - platform: state
+    entity_id: !input test_button
+    id: "test"
+
+condition:
+  - condition: or
+    conditions:
+      # Test-Schaltfläche gedrückt – nur Ruhezeit blockiert
+      - condition: and
+        conditions:
+          - condition: trigger
+            id: "test"
+          - condition: template
+            value_template: >-
+              {% if not quiet_hours_enabled %}
+                true
+              {% else %}
+                {% set t = now().strftime('%H:%M') %}
+                {% set qs = quiet_start[:5] %}
+                {% set qe = quiet_end[:5] %}
+                {% if qs < qe %}
+                  {{ not (qs <= t < qe) }}
+                {% else %}
+                  {{ t >= qe and t < qs }}
+                {% endif %}
+              {% endif %}
+      # Geplante Prüfung – Wochentag + Ruhezeit müssen passen
+      - condition: and
+        conditions:
+          - condition: trigger
+            id: "scheduled"
+          - condition: template
+            value_template: >-
+              {{ now().strftime('%a').lower() in check_days }}
+          - condition: template
+            value_template: >-
+              {% if not quiet_hours_enabled %}
+                true
+              {% else %}
+                {% set t = now().strftime('%H:%M') %}
+                {% set qs = quiet_start[:5] %}
+                {% set qe = quiet_end[:5] %}
+                {% if qs < qe %}
+                  {{ not (qs <= t < qe) }}
+                {% else %}
+                  {{ t >= qe and t < qs }}
+                {% endif %}
+              {% endif %}
+
+action:
+  - variables:
+      low_battery_devices: >-
+        {% set ns = namespace(items=[]) %}
+        {% set excluded = excluded_sensors
+           if excluded_sensors is iterable and excluded_sensors is not string
+           else ([excluded_sensors] if excluded_sensors else []) %}
+        {% for state in states.sensor %}
+          {% if state.attributes.get('device_class') == 'battery'
+             and state.entity_id not in excluded
+             and state.state | int(default=101) < battery_threshold %}
+            {% set ns.items = ns.items + [state.name ~ ' (' ~ state.state ~ '%)'] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.items }}
+
+  - condition: template
+    value_template: "{{ low_battery_devices | length > 0 }}"
+
+  - device_id: !input notify_device
+    domain: mobile_app
+    type: notify
+    title: "{{ notification_title }}"
+    message: >-
+      {{ notification_message
+         | replace('{devices}', low_battery_devices | join(', '))
+         | replace('{count}', low_battery_devices | length | string) }}
+
+mode: single
+max_exceeded: silent
