@@ -99,27 +99,6 @@ blueprint:
             - label: "Sonntag"
               value: "sun"
 
-    quiet_hours_enabled:
-      name: "Ruhezeit aktivieren"
-      description: >-
-        Wenn aktiv, werden während der Ruhezeit keine Benachrichtigungen
-        gesendet – auch nicht beim manuellen Test.
-      default: false
-      selector:
-        boolean:
-
-    quiet_start:
-      name: "Ruhezeit Beginn"
-      default: "22:00:00"
-      selector:
-        time:
-
-    quiet_end:
-      name: "Ruhezeit Ende"
-      default: "07:00:00"
-      selector:
-        time:
-
     test_button:
       name: "Test-Schaltfläche (optional)"
       description: >-
@@ -136,9 +115,6 @@ variables:
   excluded_sensors: !input excluded_sensors
   notification_message: !input notification_message
   notification_title: !input notification_title
-  quiet_hours_enabled: !input quiet_hours_enabled
-  quiet_start: !input quiet_start
-  quiet_end: !input quiet_end
   check_days: !input check_days
 
 trigger:
@@ -152,26 +128,10 @@ trigger:
 condition:
   - condition: or
     conditions:
-      # Test-Schaltfläche gedrückt – nur Ruhezeit blockiert
-      - condition: and
-        conditions:
-          - condition: trigger
-            id: "test"
-          - condition: template
-            value_template: >-
-              {% if not quiet_hours_enabled %}
-                true
-              {% else %}
-                {% set t = now().strftime('%H:%M') %}
-                {% set qs = quiet_start[:5] %}
-                {% set qe = quiet_end[:5] %}
-                {% if qs < qe %}
-                  {{ not (qs <= t < qe) }}
-                {% else %}
-                  {{ t >= qe and t < qs }}
-                {% endif %}
-              {% endif %}
-      # Geplante Prüfung – Wochentag + Ruhezeit müssen passen
+      # Test-Schaltfläche: immer auslösen
+      - condition: trigger
+        id: "test"
+      # Geplante Prüfung: nur wenn Wochentag passt
       - condition: and
         conditions:
           - condition: trigger
@@ -179,20 +139,6 @@ condition:
           - condition: template
             value_template: >-
               {{ now().strftime('%a').lower() in check_days }}
-          - condition: template
-            value_template: >-
-              {% if not quiet_hours_enabled %}
-                true
-              {% else %}
-                {% set t = now().strftime('%H:%M') %}
-                {% set qs = quiet_start[:5] %}
-                {% set qe = quiet_end[:5] %}
-                {% if qs < qe %}
-                  {{ not (qs <= t < qe) }}
-                {% else %}
-                  {{ t >= qe and t < qs }}
-                {% endif %}
-              {% endif %}
 
 action:
   - variables:
