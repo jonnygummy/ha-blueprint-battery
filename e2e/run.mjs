@@ -1,4 +1,4 @@
-// End-to-End-Test in Headless-Chromium mit simuliertem Mikrofon (WAV-Datei).
+// End-to-End-Test in Headless-Chromium mit simuliertem Mikrofon (WAV-Datei), Kamera-Bestätigung aus.
 // Prüft die echte Kette getUserMedia → AudioWorklet → Zähler → IndexedDB → Diagramm.
 // Ersetzt keinen Test am echten Smartphone am Strand.
 import { spawn } from 'node:child_process';
@@ -81,6 +81,7 @@ async function newPage(ctx) {
 
 try {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, permissions: ['microphone'], colorScheme: 'light' });
+  await ctx.addInitScript(() => localStorage.setItem('beach-rally-camera', JSON.stringify({ enabled: false, facing: 'environment', motion: 6 })));
   let page = await newPage(ctx);
   await page.goto('http://127.0.0.1:4173/');
   await page.waitForSelector('text=Spiel starten');
@@ -106,6 +107,9 @@ try {
 
   await page.waitForTimeout(Math.max(0, 18000 - (Date.now() - t0)));
   const tech = await page.evaluate(() => document.getElementById('tech-list')?.textContent ?? '');
+  const alog = await page.evaluate(() => ({ now: performance.now(), a: window.beachRallyDebug?.audio ?? [] }));
+  const el = (Date.now() - t0) / 1000;
+  console.log('  Ton-Ereignisse (s seit Klick @ dB):', alog.a.map((x) => `${(el - (alog.now - x.t) / 1000).toFixed(2)}@${x.strengthDb.toFixed(0)}`).join(' '));
   const before = await page.textContent('#counter');
   await page.click('button:has-text("Stopp")');
   const counted = Number(before);
@@ -144,6 +148,7 @@ try {
 
   // Dunkles Farbschema + Mikrofontest mit Live-Pegel (neuer Kontext, frischer Fake-Stream)
   const dark = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, permissions: ['microphone'], colorScheme: 'dark' });
+  await dark.addInitScript(() => localStorage.setItem('beach-rally-camera', JSON.stringify({ enabled: false, facing: 'environment', motion: 6 })));
   page = await newPage(dark);
   await page.goto('http://127.0.0.1:4173/');
   await page.waitForSelector('text=Spiel starten');

@@ -11,6 +11,6 @@ export type ToProcessor =
 /** Nachrichten von der Audioverarbeitung an den Haupt-Thread. */
 export type FromProcessor =
   | { type: 'ready'; sampleRate: number; frameSize: number }
-  | { type: 'hit'; gen: number }
+  | { type: 'hit'; gen: number; strengthDb: number }
   | { type: 'level'; rawDb: number; filteredDb: number; floorDb: number }
   | { type: 'calibrated'; token: number; result: CalibrationResult };

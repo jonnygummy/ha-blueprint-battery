@@ -51,7 +51,7 @@ export class DetectorHost {
   process(samples: Float32Array): void {
     const hits = this.core.process(samples);
     if (hits > 0 && this.detectGen !== null) {
-      for (let i = 0; i < hits; i++) this.post({ type: 'hit', gen: this.detectGen });
+      for (let i = 0; i < hits; i++) this.post({ type: 'hit', gen: this.detectGen, strengthDb: this.core.lastHitMarginDb });
     }
     if (this.calibration) {
       this.calibration.samplesLeft -= samples.length;

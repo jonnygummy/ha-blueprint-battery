@@ -1,5 +1,7 @@
 import type { AudioEngine } from '../audio/audioEngine';
-import { configFromSensitivity, SENSITIVITY_DEFAULT } from '../audio/detectorCore';
+import type { CameraEngine, CameraFacing } from '../camera/cameraEngine';
+import { MOTION_SENSITIVITY_DEFAULT, motionThreshold } from '../camera/motionCore';
+import { CAMERA_CANDIDATE_BOOST_DB, configFromSensitivity, SENSITIVITY_DEFAULT } from '../audio/detectorCore';
 import { isEmbedded } from '../audio/micErrors';
 import { renderTimeChart } from '../chart/timeChart';
 import { TEST_TARGET, type GameController, type Phase } from '../game/controller';
@@ -24,6 +26,37 @@ const STATUS_TEXT: Record<Phase, string> = {
 };
 
 const SENS_KEY = 'beach-rally-sensitivity';
+const CAM_KEY = 'beach-rally-camera';
+
+interface CameraPrefs {
+  enabled: boolean;
+  facing: CameraFacing;
+  motion: number;
+}
+
+function readCameraPrefs(): CameraPrefs {
+  const def: CameraPrefs = { enabled: true, facing: 'environment', motion: MOTION_SENSITIVITY_DEFAULT };
+  try {
+    const raw = localStorage.getItem(CAM_KEY);
+    if (!raw) return def;
+    const p = JSON.parse(raw) as Partial<CameraPrefs>;
+    return {
+      enabled: typeof p.enabled === 'boolean' ? p.enabled : def.enabled,
+      facing: p.facing === 'user' ? 'user' : 'environment',
+      motion: typeof p.motion === 'number' && p.motion >= 1 && p.motion <= 10 ? Math.round(p.motion) : def.motion,
+    };
+  } catch {
+    return def;
+  }
+}
+
+function writeCameraPrefs(p: CameraPrefs): void {
+  try {
+    localStorage.setItem(CAM_KEY, JSON.stringify(p));
+  } catch {
+    /* ignore */
+  }
+}
 const PAGE_SIZE = 20;
 
 function readSensitivity(): number {
@@ -67,6 +100,7 @@ export class App {
     private readonly store: GameStore,
     private readonly audio: AudioEngine,
     private readonly wake: ScreenWakeLock,
+    private readonly camera: CameraEngine,
   ) {}
 
   mount(): void {
@@ -82,10 +116,41 @@ export class App {
       this.renderSensitivity(v);
     });
 
+    // Kamera-Einstellungen
+    const prefs = readCameraPrefs();
+    this.c.setCameraEnabled(prefs.enabled);
+    this.c.setCameraFacing(prefs.facing);
+    this.c.setMotionSensitivity(prefs.motion);
+    const motion = $<HTMLInputElement>('motion-sens');
+    motion.value = String(prefs.motion);
+    const savePrefs = (): void =>
+      writeCameraPrefs({ enabled: this.c.cameraEnabled, facing: this.c.cameraFacing, motion: this.c.motionSensitivity });
+    $('cam-toggle').addEventListener('click', () => {
+      this.c.setCameraEnabled(!this.c.cameraEnabled);
+      savePrefs();
+    });
+    for (const seg of document.querySelectorAll<HTMLButtonElement>('.seg[data-facing]')) {
+      seg.addEventListener('click', () => {
+        this.c.setCameraFacing(seg.dataset.facing === 'user' ? 'user' : 'environment');
+        savePrefs();
+      });
+    }
+    motion.addEventListener('input', () => {
+      this.c.setMotionSensitivity(Number(motion.value));
+      savePrefs();
+      this.renderSheet();
+    });
+    $('cam-align-toggle').addEventListener('click', () =>
+      this.c.cameraCheck ? this.c.stopCameraCheck() : this.c.startCameraCheck(),
+    );
+    this.camera.onFrame = () => {
+      if (this.sheetOpen && !$('cam-align').hidden) this.renderAlign();
+    };
+
     for (const tab of document.querySelectorAll<HTMLButtonElement>('.tab')) {
       tab.addEventListener('click', () => this.setView(tab.dataset.view === 'stats' ? 'stats' : 'play'));
     }
-    for (const seg of document.querySelectorAll<HTMLButtonElement>('.seg')) {
+    for (const seg of document.querySelectorAll<HTMLButtonElement>('.seg[data-range]')) {
       seg.addEventListener('click', () => {
         this.range = seg.dataset.range === 'all' ? 'all' : 'today';
         this.listLimit = PAGE_SIZE;
@@ -115,8 +180,14 @@ export class App {
       if (kind === 'hit') {
         this.renderCounter();
         this.pulse();
+        this.flashCamera();
         this.renderSheet();
         this.renderLive();
+        this.renderCamRow();
+      } else if (kind === 'check') {
+        this.flashCamera();
+        this.renderSheet();
+        this.renderCamRow();
       } else if (kind === 'level') {
         if (this.sheetOpen) this.renderMeter();
       } else if (kind === 'games') {
@@ -150,6 +221,7 @@ export class App {
   private setView(v: 'play' | 'stats'): void {
     // Interner Ansichtswechsel: kein App-Wechsel, das Spiel läuft weiter.
     this.view = v;
+    this.placeVideo();
     $('view-play').hidden = v !== 'play';
     $('view-stats').hidden = v !== 'stats';
     for (const tab of document.querySelectorAll<HTMLButtonElement>('.tab')) {
@@ -165,7 +237,11 @@ export class App {
     $('adjust-sheet').hidden = !open;
     $('sheet-backdrop').hidden = !open;
     if (open) this.renderSheet();
-    else if (this.c.micCheck) this.c.stopMicCheck();
+    else {
+      if (this.c.micCheck) this.c.stopMicCheck();
+      if (this.c.cameraCheck) this.c.stopCameraCheck();
+    }
+    this.placeVideo();
   }
 
   private renderAll(): void {
@@ -177,8 +253,85 @@ export class App {
     this.renderBanners();
     this.renderHints();
     this.renderLive();
+    this.renderCamRow();
     if (this.view === 'stats') this.renderStats();
     this.renderSheet();
+    this.placeVideo();
+  }
+
+  // ---------- Kamera ----------
+
+  /** Das eine Video-Element dorthin hängen, wo es gerade sichtbar sein soll. */
+  private placeVideo(): void {
+    const v = this.camera.video;
+    const c = this.c;
+    const live = c.cameraStatus === 'live' || c.cameraStatus === 'starting';
+    let target: HTMLElement | null = null;
+    if (live && this.sheetOpen && c.cameraCheck) target = $('cam-align-frame');
+    else if (live && this.view === 'play' && !$('cam-row').hidden) target = $('cam-thumb');
+    if (target) {
+      if (v.parentElement !== target) {
+        target.prepend(v);
+        void v.play().catch(() => undefined);
+      }
+    } else if (v.parentElement) {
+      v.remove();
+    }
+  }
+
+  private renderCamRow(): void {
+    const c = this.c;
+    const row = $('cam-row');
+    const p = c.phase;
+    const inGame = p === 'running' || p === 'calibrating' || p === 'countdown' || p === 'interrupted';
+    row.hidden = !c.cameraEnabled || !(inGame || (p === 'stopped' && !!c.checkStats));
+    const off = c.cameraEnabled && c.cameraStatus === 'failed';
+    row.classList.toggle('is-off', off);
+    const st = c.checkStats;
+    if (off) {
+      $('cam-title').textContent = 'Nur Ton – Kamera aus';
+      $('cam-sub').textContent = c.cameraNotice?.title ?? 'Kamera nicht verfügbar.';
+    } else if (c.cameraStatus === 'starting') {
+      $('cam-title').textContent = 'Kamera startet …';
+      $('cam-sub').textContent = 'Spielfeld ins Bild nehmen.';
+    } else if (c.cameraStatus === 'live' || st) {
+      $('cam-title').textContent = c.cameraStatus === 'live' ? 'Kamera prüft Schläge' : 'Kamera-Prüfung';
+      $('cam-sub').textContent = st && st.candidates > 0 ? `${st.confirmed + st.noCamera} von ${st.candidates} Tönen gezählt` : 'Noch kein Ton geprüft.';
+    } else {
+      $('cam-title').textContent = 'Kamera';
+      $('cam-sub').textContent = '';
+    }
+    this.placeVideo();
+  }
+
+  private flashCamera(): void {
+    const d = this.c.lastDecision;
+    if (!d || performance.now() - d.at > 500) return;
+    const thumb = $('cam-thumb');
+    const cls = d.outcome === 'rejected' ? 'flash-no' : 'flash-ok';
+    thumb.classList.remove('flash-ok', 'flash-no');
+    void thumb.offsetWidth;
+    thumb.classList.add(cls);
+    window.setTimeout(() => thumb.classList.remove(cls), 350);
+  }
+
+  private renderAlign(): void {
+    const thr = motionThreshold(this.c.motionSensitivity);
+    const scale = Math.max(30, thr * 2.5);
+    const score = this.camera.lastScore;
+    $('motion-fill').style.width = `${Math.min(100, (score / scale) * 100).toFixed(1)}%`;
+    $('motion-mark').style.left = `${Math.min(100, (thr / scale) * 100).toFixed(1)}%`;
+    const peak = this.camera.lastPeakCell;
+    const box = $('cam-peak');
+    if (!peak || score < thr * 0.6) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.style.left = `${(peak.col / peak.cols) * 100}%`;
+    box.style.top = `${(peak.row / peak.rows) * 100}%`;
+    box.style.width = `${100 / peak.cols}%`;
+    box.style.height = `${100 / peak.rows}%`;
   }
 
   // ---------- Spielen ----------
@@ -327,6 +480,9 @@ export class App {
       play.push(this.banner('danger', c.error.title, c.error.action, acts));
     }
     if (c.info) play.push(this.banner('info', 'Hinweis', c.info));
+    if (c.cameraEnabled && c.cameraNotice) {
+      play.push(this.banner('warn', c.cameraNotice.title, c.cameraNotice.action, [button('Verstanden', '', () => c.dismissCameraNotice())]));
+    }
     if (isEmbedded() && c.phase === 'ready' && !c.error) {
       play.push(
         this.banner('info', 'Du siehst eine eingebettete Vorschau.', 'Falls das Mikrofon hier nicht freigegeben wird: Link direkt in Safari oder Chrome öffnen.'),
@@ -367,7 +523,7 @@ export class App {
   }
 
   private renderStats(): void {
-    for (const seg of document.querySelectorAll<HTMLButtonElement>('.seg')) {
+    for (const seg of document.querySelectorAll<HTMLButtonElement>('.seg[data-range]')) {
       seg.setAttribute('aria-pressed', String(seg.dataset.range === this.range));
     }
     const all = this.store.all();
@@ -422,6 +578,10 @@ export class App {
       ['Schläge', fmtInt(g.hits)],
       ['Aktive Dauer', fmtDuration(g.activeMs)],
     ];
+    if (g.cameraCheck && g.cameraCheck.candidates > 0) {
+      const k = g.cameraCheck;
+      items.push(['Kamera', `${k.confirmed + k.noCamera} von ${k.candidates} Tönen gezählt`]);
+    }
     for (const [k, v] of items) {
       const d = document.createElement('div');
       const kk = document.createElement('span');
@@ -471,7 +631,7 @@ export class App {
   // ---------- Anpassen ----------
 
   private renderSensitivity(v: number): void {
-    const cfg = configFromSensitivity(v);
+    const cfg = configFromSensitivity(v, this.c.cameraActive ? CAMERA_CANDIDATE_BOOST_DB : 0);
     $('sens-value').textContent = `${v} von 10`;
     this.renderTech(cfg.thresholdDb);
   }
@@ -507,8 +667,11 @@ export class App {
       $('test-count').textContent = String(t.count);
       $('test-label').textContent = t.listening ? `von ${TEST_TARGET} erkannt` : 'Umgebung messen …';
       advice.hidden = !t.listening || t.count === 0;
+      const rejected = t.check.rejected;
       advice.textContent =
-        t.count < TEST_TARGET
+        t.count < TEST_TARGET && rejected > 0
+          ? `Die Kamera hat ${rejected} Ton${rejected === 1 ? '' : 'e'} verworfen. Regler „Bewegung“ erhöhen oder Kamera besser ausrichten.`
+          : t.count < TEST_TARGET
           ? 'Nicht alle erkannt? Empfindlichkeit erhöhen und nochmal testen.'
           : t.count > TEST_TARGET
             ? 'Mehr als 5 erkannt? Empfindlichkeit verringern.'
@@ -518,13 +681,37 @@ export class App {
     }
     $('test-resume').hidden = !(c.phase === 'interrupted' && !t);
 
+    // Kamera-Bestätigung
+    const camToggle = $('cam-toggle');
+    camToggle.setAttribute('aria-checked', String(c.cameraEnabled));
+    $('cam-settings').hidden = !c.cameraEnabled;
+    for (const seg of document.querySelectorAll<HTMLButtonElement>('.seg[data-facing]')) {
+      seg.setAttribute('aria-pressed', String(seg.dataset.facing === c.cameraFacing));
+    }
+    const align = $<HTMLButtonElement>('cam-align-toggle');
+    align.textContent = c.cameraCheck ? 'Ausrichten beenden' : 'Kamera ausrichten';
+    const showAlign = c.cameraCheck && (c.cameraStatus === 'live' || c.cameraStatus === 'starting');
+    $('cam-align').hidden = !showAlign;
+    $('motion-value').textContent = `${c.motionSensitivity} von 10`;
+    const diag = $('check-diag');
+    const st = c.checkStats;
+    diag.hidden = !c.cameraEnabled || !st;
+    if (st) {
+      const parts = [`Ton erkannt: ${st.candidates}`, `bestätigt: ${st.confirmed}`, `verworfen: ${st.rejected}`];
+      if (st.noCamera > 0) parts.push(`ohne Kamera gezählt: ${st.noCamera}`);
+      diag.textContent = `${c.test ? 'Schlagtest' : 'Dieses Spiel'} · ${parts.join(' · ')}`;
+    }
+
     const mic = $<HTMLButtonElement>('mic-toggle');
     mic.textContent = c.micCheck ? 'Mikrofontest beenden' : 'Mikrofon testen';
     const showMeter = c.micCheck || !!t || c.phase === 'running';
     $('meter').hidden = !showMeter;
     $('meter-floor').hidden = true;
     this.renderMeter();
-    this.renderTech(configFromSensitivity(Number($<HTMLInputElement>('sensitivity').value)).thresholdDb);
+    this.renderTech(
+      configFromSensitivity(Number($<HTMLInputElement>('sensitivity').value), c.cameraActive ? CAMERA_CANDIDATE_BOOST_DB : 0).thresholdDb,
+    );
+    if (showAlign) this.renderAlign();
   }
 
   private renderMeter(): void {
@@ -545,6 +732,8 @@ export class App {
       ['Hintergrund', this.c.level ? `${this.c.level.floorDb.toFixed(0)} dB` : '–'],
       ['Schwelle über Hintergrund', `${thresholdDb.toFixed(1)} dB`],
       ['Sperrzeit', '180 ms'],
+      ['Kamera', this.camera.info ? `${this.camera.info.width}×${this.camera.info.height}${this.camera.info.fps ? `, ${this.camera.info.fps} fps` : ''}` : '–'],
+      ['Kamera-Schwelle', `${motionThreshold(this.c.motionSensitivity).toFixed(1)}`],
       ['Speicher', this.store.persistent ? 'IndexedDB aktiv' : 'nicht dauerhaft'],
     ];
     const dl = $('tech-list');

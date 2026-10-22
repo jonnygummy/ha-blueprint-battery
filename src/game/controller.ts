@@ -1,6 +1,10 @@
 import type { AudioPort, LevelInfo } from '../audio/audioEngine';
+import { CAMERA_CANDIDATE_BOOST_DB, SENSITIVITY_DEFAULT } from '../audio/detectorCore';
 import { CancelledError, MicAccessError, classifyGetUserMediaError, type MicError } from '../audio/micErrors';
+import { cameraError, classifyCameraError, type CameraError, type CameraFacing, type CameraPort } from '../camera/cameraEngine';
+import { MOTION_SENSITIVITY_DEFAULT, motionThreshold } from '../camera/motionCore';
 import type { GameRecord, GameStore } from '../storage/gameStore';
+import { HitFusion, emptyStats, type FusionDecision, type FusionOutcome, type FusionStats } from './fusion';
 
 /** Explizite Zustände des Spielablaufs. */
 export type Phase = 'ready' | 'calibrating' | 'countdown' | 'running' | 'interrupted' | 'stopped';
@@ -35,7 +39,11 @@ interface LiveGame {
   activeMs: number;
   runningSince: number | null;
   saved: boolean;
+  check: FusionStats;
+  usedCamera: boolean;
 }
+
+export type CameraStatus = 'off' | 'starting' | 'live' | 'failed';
 
 export interface Calibration {
   floorDb: number;
@@ -47,9 +55,10 @@ export interface TestState {
   count: number;
   listening: boolean;
   gen: number;
+  check: FusionStats;
 }
 
-export type ChangeKind = 'state' | 'hit' | 'level' | 'games';
+export type ChangeKind = 'state' | 'hit' | 'level' | 'games' | 'check';
 
 export const CALIBRATION_MS = 3000;
 export const CALIBRATION_MAX_AGE_MS = 10 * 60 * 1000;
@@ -81,6 +90,22 @@ export class GameController {
   /** Gerade abgeschlossenes Spiel (für Korrekturen nach „Stopp“). */
   stoppedRecord: GameRecord | null = null;
 
+  // Kamera-Bestätigung
+  cameraEnabled = true;
+  cameraFacing: CameraFacing = 'environment';
+  cameraStatus: CameraStatus = 'off';
+  cameraNotice: CameraError | null = null;
+  /** Kamera nur zum Ausrichten geöffnet (ohne Spiel). */
+  cameraCheck = false;
+  audioSensitivity = SENSITIVITY_DEFAULT;
+  motionSensitivity = MOTION_SENSITIVITY_DEFAULT;
+  lastDecision: { outcome: FusionOutcome; at: number } | null = null;
+  /** Letzte Entscheidungen der Kamera-Prüfung (Diagnose, nur im Speicher). */
+  readonly decisionLog: FusionDecision[] = [];
+  /** Letzte Ton-Ereignisse mit Stärke über Hintergrund (Diagnose, nur im Speicher). */
+  readonly audioLog: { t: number; strengthDb: number }[] = [];
+  private readonly fusion: HitFusion | null;
+
   private game: LiveGame | null = null;
   private gen = 0;
   private timers = new Set<number>();
@@ -94,8 +119,19 @@ export class GameController {
     private readonly clock: Clock,
     private readonly wake: WakeLockPort,
     private readonly drafts: DraftStorage | null = null,
+    private readonly camera: CameraPort | null = null,
   ) {
-    audio.onHit = (gen) => this.handleHit(gen);
+    audio.onHit = (gen, strengthDb) => {
+      if (gen === this.gen) {
+        this.audioLog.push({ t: this.clock.mono(), strengthDb });
+        if (this.audioLog.length > 100) this.audioLog.shift();
+      }
+      this.handleHit(gen);
+    };
+    this.fusion = camera
+      ? new HitFusion(clock, camera, (d) => this.handleDecision(d), motionThreshold(this.motionSensitivity))
+      : null;
+    if (camera) camera.onInterrupted = () => this.handleCameraLost();
     audio.onLevel = (lvl) => {
       this.level = lvl;
       this.emit('level');
@@ -144,6 +180,18 @@ export class GameController {
     return this.gameInProgress || (this.phase === 'stopped' && !!this.stoppedRecord);
   }
 
+  /** Ton-Kandidaten werden gerade von der Kamera geprüft. */
+  get cameraActive(): boolean {
+    return !!this.camera && this.cameraEnabled && this.cameraStatus === 'live' && this.camera.isLive();
+  }
+
+  /** Diagnose der Kamera-Bestätigung für das laufende/letzte Spiel bzw. den Schlagtest. */
+  get checkStats(): FusionStats | null {
+    if (this.test) return this.test.check;
+    if (this.game && !this.game.saved) return this.game.usedCamera ? this.game.check : null;
+    return this.stoppedRecord?.cameraCheck ?? null;
+  }
+
   calibrationUsable(): boolean {
     return !!this.calibration && this.clock.mono() - this.calibration.at < CALIBRATION_MAX_AGE_MS;
   }
@@ -161,7 +209,7 @@ export class GameController {
     if ((this.phase === 'calibrating' || this.phase === 'countdown') && !this.gameInProgress) return;
     if (this.gameInProgress) {
       this.gen++;
-      this.audio.detect(null);
+      this.stopDetection();
       this.finalize();
     }
     this.beginRound(false);
@@ -172,7 +220,7 @@ export class GameController {
     if (this.gameInProgress) {
       this.gen++;
       this.clearTimers();
-      this.audio.detect(null);
+      this.stopDetection();
       if (this.test) this.test = null;
       this.finalize();
       this.phase = 'stopped';
@@ -202,6 +250,7 @@ export class GameController {
     this.setMessage(MSG_MIC);
     this.wake.request();
     const ready = this.audio.ensure();
+    this.startCamera();
     this.emit('state');
     ready
       .then(() => {
@@ -246,7 +295,7 @@ export class GameController {
     const inGame = this.gameInProgress;
     if (inGame) {
       this.pauseClock();
-      this.audio.detect(null);
+      this.stopDetection();
       this.phase = 'calibrating';
       this.interruptReason = null;
       this.wake.request();
@@ -255,6 +304,7 @@ export class GameController {
     }
     this.setMessage(MSG_MIC);
     const ready = this.audio.ensure();
+    if (inGame) this.startCamera();
     this.emit('state');
     ready
       .then(async () => {
@@ -293,8 +343,9 @@ export class GameController {
     if (this.phase === 'running') this.interrupt('test');
     const myGen = ++this.gen;
     this.error = null;
-    this.test = { count: 0, listening: false, gen: myGen };
+    this.test = { count: 0, listening: false, gen: myGen, check: emptyStats() };
     const ready = this.audio.ensure();
+    this.startCamera();
     this.emit('state');
     ready
       .then(async () => {
@@ -327,7 +378,7 @@ export class GameController {
     if (!this.test) return;
     this.test = null;
     this.gen++;
-    this.audio.detect(null);
+    this.stopDetection();
     if (this.message === MSG_MEASURE && !this.gameInProgress) this.setMessage(null);
     this.releaseAudioIfIdle();
     this.emit('state');
@@ -360,7 +411,60 @@ export class GameController {
   }
 
   setSensitivity(value: number): void {
-    this.audio.setSensitivity(value);
+    this.audioSensitivity = value;
+    this.applyAudioConfig();
+  }
+
+  setMotionSensitivity(value: number): void {
+    this.motionSensitivity = value;
+    if (this.fusion) this.fusion.threshold = motionThreshold(value);
+  }
+
+  /** Kamera-Bestätigung ein/aus. Aus einer Nutzeraktion aufrufen (Kamerastart). */
+  setCameraEnabled(on: boolean): void {
+    if (on === this.cameraEnabled) return;
+    this.cameraEnabled = on;
+    if (on) {
+      if (this.devicesNeeded()) this.startCamera();
+    } else {
+      this.cameraCheck = false;
+      this.camera?.release();
+      this.cameraStatus = 'off';
+      this.cameraNotice = null;
+    }
+    this.applyAudioConfig();
+    this.emit('state');
+  }
+
+  setCameraFacing(facing: CameraFacing): void {
+    if (facing === this.cameraFacing) return;
+    this.cameraFacing = facing;
+    if (this.camera && (this.cameraStatus === 'live' || this.cameraStatus === 'starting')) {
+      this.camera.release();
+      this.cameraStatus = 'off';
+      this.startCamera();
+    }
+    this.emit('state');
+  }
+
+  /** Kamera nur zum Ausrichten öffnen. */
+  startCameraCheck(): void {
+    if (!this.camera || !this.cameraEnabled || this.cameraCheck) return;
+    this.cameraCheck = true;
+    this.startCamera();
+    this.emit('state');
+  }
+
+  stopCameraCheck(): void {
+    if (!this.cameraCheck) return;
+    this.cameraCheck = false;
+    this.releaseAudioIfIdle();
+    this.emit('state');
+  }
+
+  dismissCameraNotice(): void {
+    this.cameraNotice = null;
+    this.emit('state');
   }
 
   /** App-Wechsel oder verborgener Tab. */
@@ -371,7 +475,7 @@ export class GameController {
       if (this.gameInProgress) {
         this.gen++;
         this.clearTimers();
-        this.audio.detect(null);
+        this.stopDetection();
         this.phase = 'interrupted';
         this.interruptReason = 'hidden';
         this.countdown = null;
@@ -423,7 +527,7 @@ export class GameController {
     this.clearTimers();
     if (this.test) {
       this.test = null;
-      this.audio.detect(null);
+      this.stopDetection();
     }
     this.game = null;
     this.stoppedRecord = null;
@@ -436,6 +540,7 @@ export class GameController {
     this.setMessage(MSG_MIC);
     this.wake.request();
     const ready = this.audio.ensure(); // synchron in der Nutzeraktion
+    this.startCamera(); // parallel; wärmt sich während der Messung auf
     this.emit('state');
     ready
       .then(async () => {
@@ -469,6 +574,8 @@ export class GameController {
       activeMs: 0,
       runningSince: this.clock.mono(),
       saved: false,
+      check: emptyStats(),
+      usedCamera: this.cameraActive,
     };
     this.phase = 'running';
     this.countdown = null;
@@ -512,7 +619,7 @@ export class GameController {
   private cancelPreparation(error: MicError | null): void {
     this.gen++;
     this.clearTimers();
-    this.audio.detect(null);
+    this.stopDetection();
     this.phase = 'ready';
     this.countdown = null;
     this.setMessage(null);
@@ -525,7 +632,7 @@ export class GameController {
   private interrupt(reason: InterruptReason): void {
     if (this.phase !== 'running') return;
     this.gen++;
-    this.audio.detect(null);
+    this.stopDetection();
     this.pauseClock();
     this.phase = 'interrupted';
     this.interruptReason = reason;
@@ -574,6 +681,40 @@ export class GameController {
 
   private handleHit(gen: number): void {
     if (gen !== this.gen) return; // verspätete Ereignisse alter Runden verwerfen
+    const stats = this.targetStats(gen);
+    if (!stats) return;
+    if (this.cameraActive && this.fusion) {
+      // Ton liefert nur einen Kandidaten; die Kamera entscheidet gleich.
+      stats.candidates++;
+      if (this.game && !this.game.saved && this.phase === 'running') this.game.usedCamera = true;
+      this.fusion.submit(gen);
+      this.emit('check');
+      return;
+    }
+    this.countHit(gen);
+  }
+
+  private handleDecision(d: FusionDecision): void {
+    if (d.gen !== this.gen) return; // Spiel inzwischen gestoppt oder pausiert
+    const stats = this.targetStats(d.gen);
+    if (!stats) return;
+    if (d.outcome === 'confirmed') stats.confirmed++;
+    else if (d.outcome === 'rejected') stats.rejected++;
+    else stats.noCamera++;
+    this.lastDecision = { outcome: d.outcome, at: this.clock.mono() };
+    this.decisionLog.push(d);
+    if (this.decisionLog.length > 50) this.decisionLog.shift();
+    if (d.outcome !== 'rejected') this.countHit(d.gen);
+    else this.emit('check');
+  }
+
+  private targetStats(gen: number): FusionStats | null {
+    if (this.phase === 'running' && this.game && !this.game.saved) return this.game.check;
+    if (this.test && this.test.listening && this.test.gen === gen) return this.test.check;
+    return null;
+  }
+
+  private countHit(gen: number): void {
     if (this.phase === 'running' && this.game && !this.game.saved) {
       this.game.hits++;
       this.saveDraft(false);
@@ -584,6 +725,53 @@ export class GameController {
       this.test.count++;
       this.emit('hit');
     }
+  }
+
+  private stopDetection(): void {
+    this.audio.detect(null);
+    this.fusion?.cancelAll();
+  }
+
+  private startCamera(): void {
+    const cam = this.camera;
+    if (!cam || !this.cameraEnabled) return;
+    if (this.cameraStatus === 'live' && cam.isLive()) return;
+    this.cameraStatus = 'starting';
+    cam
+      .ensure(this.cameraFacing)
+      .then(() => {
+        if (!this.cameraEnabled || (!this.devicesNeeded() && !this.cameraCheck)) {
+          cam.release();
+          this.cameraStatus = 'off';
+          return;
+        }
+        this.cameraStatus = 'live';
+        this.cameraNotice = null;
+        this.applyAudioConfig();
+        this.emit('state');
+      })
+      .catch((err) => {
+        if (err instanceof CancelledError) return;
+        this.cameraStatus = 'failed';
+        this.cameraNotice = classifyCameraError(err);
+        this.cameraCheck = false;
+        this.applyAudioConfig();
+        this.emit('state');
+      });
+  }
+
+  private handleCameraLost(): void {
+    this.camera?.release();
+    this.cameraStatus = 'failed';
+    this.cameraNotice = cameraError('lost');
+    this.cameraCheck = false;
+    this.applyAudioConfig();
+    this.emit('state');
+  }
+
+  /** Mit aktiver Kamera liefert der Ton empfindlichere Kandidaten. */
+  private applyAudioConfig(): void {
+    this.audio.setSensitivity(this.audioSensitivity, this.cameraActive ? CAMERA_CANDIDATE_BOOST_DB : 0);
   }
 
   /** Schließt das laufende Spiel genau einmal ab. */
@@ -600,6 +788,7 @@ export class GameController {
       activeMs: Math.round(g.activeMs),
       hits: g.hits,
     };
+    if (g.usedCamera) rec.cameraCheck = { ...g.check };
     if (this.level && this.calibration) {
       // nachgeführten Hintergrund für die nächste Runde merken
       this.calibration = { ...this.calibration, floorDb: this.level.floorDb };
@@ -637,16 +826,27 @@ export class GameController {
     }
   }
 
-  private releaseAudioIfIdle(): void {
-    const needed =
+  private devicesNeeded(): boolean {
+    return (
       this.phase === 'calibrating' ||
       this.phase === 'countdown' ||
       this.phase === 'running' ||
       this.phase === 'interrupted' ||
       !!this.test ||
       this.micCheck ||
-      this.standaloneCalibrating;
+      this.standaloneCalibrating
+    );
+  }
+
+  /** Mikrofon und Kamera freigeben, sobald nichts sie mehr braucht. */
+  private releaseAudioIfIdle(): void {
+    const needed = this.devicesNeeded();
     if (!needed) this.audio.release();
+    if (this.camera && !needed && !this.cameraCheck && this.cameraStatus !== 'off') {
+      this.camera.release();
+      if (this.cameraStatus !== 'failed') this.cameraStatus = 'off';
+      this.applyAudioConfig();
+    }
   }
 
   private setMessage(msg: string | null): void {

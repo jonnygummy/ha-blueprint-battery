@@ -47,15 +47,21 @@ export interface LevelSnapshot {
 
 export const SENSITIVITY_MIN = 1;
 export const SENSITIVITY_MAX = 10;
-export const SENSITIVITY_DEFAULT = 6;
+export const SENSITIVITY_DEFAULT = 7;
 
-/** Ordnet den Empfindlichkeitsregler (1–10) den Erkennungsschwellen zu. */
-export function configFromSensitivity(sensitivity: number): DetectorConfig {
+/** Schwellensenkung, wenn die Kamera Ton-Kandidaten bestätigt (dB). */
+export const CAMERA_CANDIDATE_BOOST_DB = 7;
+
+/**
+ * Ordnet den Empfindlichkeitsregler (1–10) den Erkennungsschwellen zu.
+ * boostDb senkt die Schwelle zusätzlich (Kamera-Bestätigung: Ton liefert nur Kandidaten).
+ */
+export function configFromSensitivity(sensitivity: number, boostDb = 0): DetectorConfig {
   const s = Math.min(SENSITIVITY_MAX, Math.max(SENSITIVITY_MIN, sensitivity));
-  const thresholdDb = 30 - 2.4 * s; // 1 → 27.6 dB … 6 → 15.6 dB … 10 → 6 dB
+  const thresholdDb = Math.max(3, 30 - 2.4 * s - boostDb); // 1 → 27.6 dB … 6 → 15.6 dB … 10 → 6 dB
   return {
     thresholdDb,
-    riseDb: Math.max(5, thresholdDb * 0.7),
+    riseDb: Math.max(4, thresholdDb * 0.55),
     hysteresisDb: Math.min(6, thresholdDb / 2),
     refractoryMs: 180,
     highpassHz: 900,
@@ -151,6 +157,8 @@ export class DetectorCore {
 
   private levelRawMax = SILENCE_DB;
   private levelFilteredMax = SILENCE_DB;
+  /** Pegel des zuletzt gezählten Impulses über dem Hintergrund (dB). */
+  lastHitMarginDb = 0;
 
   constructor(sampleRate: number, config: DetectorConfig) {
     this.sampleRate = sampleRate;
@@ -308,6 +316,7 @@ export class DetectorCore {
       this.activeSinceFrame = f;
       this.lastHitFrame = f;
       this.peakDb = db;
+      this.lastHitMarginDb = db - this.floorDb;
       counted = true;
     }
 

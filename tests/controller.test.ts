@@ -5,6 +5,8 @@ import type { AudioPort, LevelInfo } from '../src/audio/audioEngine';
 import type { CalibrationResult } from '../src/audio/detectorCore';
 import { GameController, type Clock, type DraftStorage, type WakeLockPort } from '../src/game/controller';
 import { GameStore } from '../src/storage/gameStore';
+import type { CameraFacing, CameraPort } from '../src/camera/cameraEngine';
+import { CAMERA_CANDIDATE_BOOST_DB } from '../src/audio/detectorCore';
 
 const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 
@@ -88,7 +90,10 @@ class FakeAudio implements AudioPort {
   detect(gen: number | null) {
     this.detectGen = gen;
   }
-  setSensitivity() {}
+  lastBoost = 0;
+  setSensitivity(_s: number, boost = 0) {
+    this.lastBoost = boost;
+  }
   release() {
     this.releases++;
     this.live = false;
@@ -426,5 +431,153 @@ describe('Speicherung', () => {
     expect(s2.all()).toHaveLength(1);
     expect(s2.all()[0].hits).toBe(2);
     expect(drafts.v).toBeNull();
+  });
+});
+
+
+/** Ersatz für die Kamera: Bewegung zu festgelegten Zeitpunkten. */
+class FakeCamera implements CameraPort {
+  onInterrupted: (() => void) | null = null;
+  live = false;
+  ensureCalls = 0;
+  releases = 0;
+  fail: unknown = null;
+  facing: CameraFacing | null = null;
+  motionAt: number[] = [];
+  ensure(facing: CameraFacing) {
+    this.ensureCalls++;
+    this.facing = facing;
+    if (this.fail) return Promise.reject(this.fail);
+    this.live = true;
+    return Promise.resolve();
+  }
+  isLive() {
+    return this.live;
+  }
+  peak(t0: number, t1: number) {
+    if (!this.live) return null;
+    return this.motionAt.some((t) => t >= t0 && t <= t1) ? 30 : 1;
+  }
+  typical() {
+    return this.live ? 1 : null;
+  }
+  release() {
+    this.releases++;
+    this.live = false;
+  }
+}
+
+describe('Kamera-Bestätigung', () => {
+  let cam: FakeCamera;
+  let cc: GameController;
+
+  beforeEach(() => {
+    cam = new FakeCamera();
+    cc = new GameController(audio, store, clock, wake, drafts, cam);
+  });
+
+  async function run() {
+    cc.start();
+    await clock.advance(3000);
+    expect(cc.phase).toBe('running');
+  }
+
+  /** Ton-Kandidat; withMotion = Schwung im Bild zur selben Zeit */
+  async function candidate(withMotion: boolean) {
+    if (withMotion) cam.motionAt.push(clock.mono() + 80);
+    audio.hit();
+    await clock.advance(400);
+  }
+
+  it('startet die Kamera mit dem Spiel und macht den Ton empfindlicher', async () => {
+    await run();
+    expect(cam.ensureCalls).toBe(1);
+    expect(cc.cameraActive).toBe(true);
+    expect(audio.lastBoost).toBe(CAMERA_CANDIDATE_BOOST_DB);
+  });
+
+  it('zählt nur Töne mit Bewegung und speichert die Prüfung im Spiel', async () => {
+    await run();
+    await candidate(true);
+    await candidate(false);
+    await candidate(true);
+    expect(cc.hits).toBe(2);
+    cc.stop();
+    await flush();
+    const g = store.all()[0];
+    expect(g.hits).toBe(2);
+    expect(g.cameraCheck).toEqual({ candidates: 3, confirmed: 2, rejected: 1, noCamera: 0 });
+    expect(cam.live).toBe(false); // Kamera mit Stopp freigegeben
+  });
+
+  it('Kandidat kurz vor Stopp verändert den Zähler danach nicht', async () => {
+    await run();
+    cam.motionAt.push(clock.mono() + 50);
+    audio.hit();
+    cc.stop();
+    await clock.advance(1000);
+    expect(store.all()[0].hits).toBe(0);
+  });
+
+  it('Kamera verweigert: Spiel läuft sichtbar nur mit Ton, normale Schwelle', async () => {
+    cam.fail = Object.assign(new Error('x'), { name: 'NotAllowedError' });
+    (globalThis as { window?: unknown }).window = { self: 1, top: 1 };
+    await run();
+    expect(cc.cameraStatus).toBe('failed');
+    expect(cc.cameraNotice?.problem).toBe('denied');
+    expect(cc.cameraNotice?.action).toMatch(/nur mit Ton/);
+    expect(audio.lastBoost).toBe(0);
+    audio.hit();
+    expect(cc.hits).toBe(1); // sofort, ohne Kamera-Prüfung
+  });
+
+  it('Kamera fällt während des Spiels aus: offene Kandidaten zählen, danach nur Ton', async () => {
+    await run();
+    audio.hit(); // Kandidat offen
+    cam.live = false;
+    cam.onInterrupted?.();
+    expect(cc.cameraStatus).toBe('failed');
+    expect(cc.cameraNotice?.problem).toBe('lost');
+    expect(audio.lastBoost).toBe(0);
+    await clock.advance(400);
+    expect(cc.hits).toBe(1); // „ohne Kamera“ gezählt statt verloren
+    audio.hit();
+    expect(cc.hits).toBe(2);
+    expect(cc.phase).toBe('running');
+  });
+
+  it('Schlagtest mit Kamera: verworfene Töne zählen nicht', async () => {
+    cc.startTest();
+    await clock.advance(3000);
+    expect(cc.test?.listening).toBe(true);
+    await candidate(true);
+    await candidate(true);
+    await candidate(false);
+    expect(cc.test?.count).toBe(2);
+    expect(cc.test?.check.rejected).toBe(1);
+    cc.endTest();
+    expect(store.all()).toHaveLength(0);
+    expect(cam.live).toBe(false);
+  });
+
+  it('Kamera-Bestätigung ausgeschaltet: keine Kamera, normale Schwelle', async () => {
+    cc.setCameraEnabled(false);
+    await run();
+    expect(cam.ensureCalls).toBe(0);
+    expect(audio.lastBoost).toBe(0);
+    audio.hit();
+    expect(cc.hits).toBe(1);
+  });
+
+  it('Pause und Fortsetzen behalten die Kamera-Statistik', async () => {
+    await run();
+    await candidate(true);
+    cc.handleHidden();
+    cc.resume();
+    await clock.advance(3000);
+    await candidate(false);
+    cc.stop();
+    await flush();
+    expect(store.all()[0].cameraCheck).toEqual({ candidates: 2, confirmed: 1, rejected: 1, noCamera: 0 });
   });
 });

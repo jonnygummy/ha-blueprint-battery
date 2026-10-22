@@ -4,7 +4,8 @@ Mobile Web-App: zählt beim Beachball die Kontakte zwischen Ball und Schläger �
 und dokumentiert alle Spiele mit Statistik und Liniendiagramm. Audio wird nur lokal und flüchtig verarbeitet.
 
 - `src/audio` – Mikrofon, AudioWorklet, Impulsdetektor
-- `src/game` – Spielablauf (Zustandsmaschine), Wake Lock
+- `src/camera` – Kamerazugriff und Bewegungserkennung (Kamera-Bestätigung)
+- `src/game` – Spielablauf (Zustandsmaschine), Ton+Bild-Verknüpfung, Wake Lock
 - `src/storage` – IndexedDB-Verlauf
 - `src/stats` – Kennzahlen
 - `src/chart` – SVG-Liniendiagramm mit echter Zeitachse

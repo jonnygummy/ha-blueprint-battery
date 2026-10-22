@@ -2,6 +2,7 @@ import '@fontsource/barlow-condensed/700.css';
 import '@fontsource/barlow-condensed/800.css';
 import './style.css';
 import { AudioEngine } from './audio/audioEngine';
+import { CameraEngine } from './camera/cameraEngine';
 import { GameController, type Clock, type DraftStorage } from './game/controller';
 import { ScreenWakeLock } from './game/wakeLock';
 import { GameStore } from './storage/gameStore';
@@ -45,9 +46,12 @@ async function boot(): Promise<void> {
   await store.open();
   const audio = new AudioEngine();
   const wake = new ScreenWakeLock();
-  const controller = new GameController(audio, store, clock, wake, drafts);
-  const app = new App(controller, store, audio, wake);
+  const camera = new CameraEngine();
+  const controller = new GameController(audio, store, clock, wake, drafts, camera);
+  const app = new App(controller, store, audio, wake, camera);
   app.mount();
+  // Diagnose für Tests: letzte Kamera-Entscheidungen
+  (window as unknown as { beachRallyDebug?: unknown }).beachRallyDebug = { decisions: controller.decisionLog, audio: controller.audioLog };
   await controller.recoverDraft();
 }
 

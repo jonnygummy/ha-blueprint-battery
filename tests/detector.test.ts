@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DetectorCore, configFromSensitivity } from '../src/audio/detectorCore';
+import { CAMERA_CANDIDATE_BOOST_DB, DetectorCore, configFromSensitivity } from '../src/audio/detectorCore';
 import { DetectorHost } from '../src/audio/detectorHost';
 import type { FromProcessor } from '../src/audio/protocol';
 import { add, mixAt, pock, rng, runBlocks, whiteNoise, wind } from './signals';
@@ -101,6 +101,34 @@ for (const sr of [48000, 44100]) {
   });
 }
 
+describe('Kamera-Modus: Ton liefert empfindlichere Kandidaten', () => {
+  it('ein leiser Schlag fehlt ohne Kamera, wird mit Kandidaten-Absenkung erkannt', () => {
+    const sr = 48000;
+    const run = (boost: number) => {
+      const core = new DetectorCore(sr, configFromSensitivity(6, boost));
+      core.setMode('calibrate');
+      runBlocks((b) => core.process(b), whiteNoise(sr, 3, -55, 81));
+      core.finishCalibration();
+      core.setMode('detect');
+      const sig = whiteNoise(sr, 2, -55, 82);
+      mixAt(sig, pock(sr, 0.016), 1.0, sr); // leiser Schlag, ca. 10 dB über Hintergrund
+      return runBlocks((b) => core.process(b), sig);
+    };
+    expect(run(0)).toBe(0);
+    expect(run(CAMERA_CANDIDATE_BOOST_DB)).toBe(1);
+  });
+
+  it('auch mit Absenkung erzeugt gleichmäßiges Rauschen keine Kandidaten', () => {
+    const sr = 48000;
+    const core = new DetectorCore(sr, configFromSensitivity(6, CAMERA_CANDIDATE_BOOST_DB));
+    core.setMode('calibrate');
+    runBlocks((b) => core.process(b), whiteNoise(sr, 3, -55, 83));
+    core.finishCalibration();
+    core.setMode('detect');
+    expect(runBlocks((b) => core.process(b), whiteNoise(sr, 20, -55, 84))).toBe(0);
+  });
+});
+
 describe('Kalibrierung', () => {
   it('bestimmt den Hintergrund robust trotz einzelner Impulse', () => {
     const sr = 48000;
@@ -150,7 +178,9 @@ describe('DetectorHost (Nachrichtenprotokoll wie im AudioWorklet)', () => {
     mixAt(play, pock(sr, 0.4), 0.5, sr);
     for (let i = 0; i < play.length; i += 128) host.process(play.subarray(i, i + 128));
     const hits = msgs.filter((m) => m.type === 'hit');
-    expect(hits).toEqual([{ type: 'hit', gen: 42 }]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ type: 'hit', gen: 42 });
+    expect((hits[0] as { strengthDb: number }).strengthDb).toBeGreaterThan(15);
 
     host.handle({ type: 'idle' });
     const after = whiteNoise(sr, 2, -55, 73);

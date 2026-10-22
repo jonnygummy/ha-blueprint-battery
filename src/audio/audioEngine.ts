@@ -29,9 +29,10 @@ export interface AudioPort {
   setFloor(floorDb: number, spreadDb: number): void;
   /** gen = Zählgeneration; null = Erkennung aus. */
   detect(gen: number | null): void;
-  setSensitivity(sensitivity: number): void;
+  /** boostDb senkt die Schwelle (Kamera-Bestätigung). */
+  setSensitivity(sensitivity: number, boostDb?: number): void;
   release(): void;
-  onHit: ((gen: number) => void) | null;
+  onHit: ((gen: number, strengthDb: number) => void) | null;
   onLevel: ((level: LevelInfo) => void) | null;
   onInterrupted: (() => void) | null;
 }
@@ -39,7 +40,7 @@ export interface AudioPort {
 type Ctor = typeof AudioContext;
 
 export class AudioEngine implements AudioPort {
-  onHit: ((gen: number) => void) | null = null;
+  onHit: ((gen: number, strengthDb: number) => void) | null = null;
   onLevel: ((level: LevelInfo) => void) | null = null;
   onInterrupted: (() => void) | null = null;
 
@@ -54,6 +55,7 @@ export class AudioEngine implements AudioPort {
   private epoch = 0;
   private startPromise: Promise<void> | null = null;
   private sensitivity = 6;
+  private boostDb = 0;
   private calToken = 0;
   private pendingCal: { token: number; resolve: (r: CalibrationResult) => void; reject: (e: unknown) => void; timer: number } | null = null;
   private watchdog: number | null = null;
@@ -187,7 +189,7 @@ export class AudioEngine implements AudioPort {
     ctx.addEventListener('statechange', this.handleStateChange);
 
     this.live = true;
-    this.post({ type: 'config', config: configFromSensitivity(this.sensitivity) });
+    this.post({ type: 'config', config: configFromSensitivity(this.sensitivity, this.boostDb) });
     this.lastLevelAt = performance.now();
     this.watchdog = window.setInterval(() => {
       if (this.live && performance.now() - this.lastLevelAt > 2500) this.handleInterruption();
@@ -237,7 +239,7 @@ export class AudioEngine implements AudioPort {
     if (fromEpoch !== this.epoch) return; // verspätete Nachrichten alter Streams verwerfen
     switch (msg.type) {
       case 'hit':
-        this.onHit?.(msg.gen);
+        this.onHit?.(msg.gen, msg.strengthDb);
         break;
       case 'level':
         this.lastLevelAt = performance.now();
@@ -293,9 +295,10 @@ export class AudioEngine implements AudioPort {
     this.post(gen === null ? { type: 'idle' } : { type: 'detect', gen });
   }
 
-  setSensitivity(sensitivity: number): void {
+  setSensitivity(sensitivity: number, boostDb = 0): void {
     this.sensitivity = sensitivity;
-    this.post({ type: 'config', config: configFromSensitivity(sensitivity) });
+    this.boostDb = boostDb;
+    this.post({ type: 'config', config: configFromSensitivity(sensitivity, boostDb) });
   }
 
   release(): void {

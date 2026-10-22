@@ -12,6 +12,8 @@ export interface GameRecord {
   activeMs: number;
   /** Endgültige Schlagzahl. */
   hits: number;
+  /** Nur bei Kamera-Bestätigung: Ton-Kandidaten und Entscheidungen. */
+  cameraCheck?: { candidates: number; confirmed: number; rejected: number; noCamera: number };
 }
 
 const DB_NAME = 'beach-rally';
