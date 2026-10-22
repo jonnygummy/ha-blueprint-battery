@@ -12,8 +12,8 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23006A78'/%3E%3Ccircle cx='32' cy='32' r='11' fill='%23F2A900'/%3E%3C/svg%3E"
     />
-    <script type="module" crossorigin src="./assets/index-22rpjFWL.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-BDIaRFQK.css">
+    <script type="module" crossorigin src="./assets/index-BJXG88co.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-DA1ZTpUX.css">
   </head>
   <body>
     <div id="app">
@@ -40,12 +40,20 @@
             </div>
 
             <div id="message" class="message" aria-live="polite"></div>
+
+            <div id="cam-row" class="cam-row" hidden>
+              <div id="cam-thumb" class="cam-thumb" aria-hidden="true"></div>
+              <div class="cam-text">
+                <b id="cam-title">Kamera prüft Schläge</b>
+                <span id="cam-sub" class="cam-sub"></span>
+              </div>
+            </div>
           </div>
 
           <div id="actions" class="actions"></div>
 
           <div class="play-foot">
-            <p id="setup-hint" class="hint">Handy windgeschützt und ungefähr mittig zwischen euch ablegen. Mikrofon freilassen.</p>
+            <p id="setup-hint" class="hint">Handy windgeschützt und ungefähr mittig zwischen euch seitlich am Feld aufstellen, Kamera aufs Spielfeld. Mikrofon freilassen.</p>
             <p id="wake-hint" class="hint hint-strong" hidden>Bildschirm während des Spiels eingeschaltet lassen.</p>
             <button id="open-adjust" class="btn btn-quiet" type="button">Anpassen</button>
           </div>
@@ -116,6 +124,32 @@
             <label class="group-title" for="sensitivity">Empfindlichkeit <span id="sens-value" class="muted"></span></label>
             <input id="sensitivity" class="range" type="range" min="1" max="10" step="1" value="6" />
             <div class="range-labels"><span>Weniger Fehlzählungen</span><span>Leisere Schläge</span></div>
+          </div>
+
+          <div class="group">
+            <div class="group-row">
+              <div class="group-title" id="cam-toggle-label">Kamera-Bestätigung</div>
+              <button id="cam-toggle" class="switch" type="button" role="switch" aria-checked="true" aria-labelledby="cam-toggle-label"><span class="switch-knob"></span></button>
+            </div>
+            <p class="small">Ein Ton zählt nur, wenn die Kamera im selben Moment eine schnelle Bewegung sieht. Der Ton reagiert dafür empfindlicher. Bilder werden nur verglichen, nie gespeichert.</p>
+            <div id="cam-settings" class="cam-settings">
+              <div class="segmented segmented-block" role="group" aria-label="Kamera">
+                <button type="button" class="seg" data-facing="environment" aria-pressed="true">Rückkamera</button>
+                <button type="button" class="seg" data-facing="user" aria-pressed="false">Frontkamera</button>
+              </div>
+              <button id="cam-align-toggle" class="btn btn-secondary" type="button">Kamera ausrichten</button>
+              <div id="cam-align" class="cam-align" hidden>
+                <div id="cam-align-frame" class="cam-align-frame">
+                  <div id="cam-peak" class="cam-peak" hidden></div>
+                </div>
+                <div class="motion-meter"><div id="motion-fill" class="motion-fill"></div><div id="motion-mark" class="motion-mark"></div></div>
+                <p class="small muted">Beide Spieler sollten im Bild sein. Der Rahmen springt dorthin, wo sich gerade am meisten bewegt. Ein Schwung sollte den Balken über die Markierung treiben.</p>
+              </div>
+              <label class="group-title" for="motion-sens">Bewegung <span id="motion-value" class="muted"></span></label>
+              <input id="motion-sens" class="range" type="range" min="1" max="10" step="1" value="6" />
+              <div class="range-labels"><span>Nur kräftige Schwünge</span><span>Auch kleine Bewegung</span></div>
+              <p id="check-diag" class="diag" hidden></p>
+            </div>
           </div>
 
           <div class="group">
