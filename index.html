@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#F4F8F9" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#04131C" media="(prefers-color-scheme: dark)" />
+    <meta name="description" content="Zählt beim Beachball die Schläge über das Mikrofon und dokumentiert jedes Spiel." />
+    <meta name="referrer" content="no-referrer" />
+    <title>Beach Rally</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23006A78'/%3E%3Ccircle cx='32' cy='32' r='11' fill='%23F2A900'/%3E%3C/svg%3E"
+    />
+    <script type="module" crossorigin src="./assets/index-22rpjFWL.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-BDIaRFQK.css">
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <span class="brand">Beach Rally</span>
+        <span id="status" class="status-pill" data-state="ready" role="status" aria-live="polite">Bereit</span>
+      </header>
+
+      <main id="main">
+        <!-- Spielen -->
+        <section id="view-play" class="view view-play" aria-label="Spielen">
+          <div id="play-banners" class="banners"></div>
+
+          <div class="stage">
+            <div id="counter-wrap" class="counter-wrap">
+              <span class="pulse" aria-hidden="true"></span>
+              <output id="counter" class="counter" aria-live="off">0</output>
+              <span class="counter-label">Schläge</span>
+            </div>
+
+            <div class="meta-row">
+              <span class="meta"><span class="meta-k">Zeit</span> <b id="time" class="meta-v">0:00</b></span>
+              <span class="meta"><span class="meta-k">Bestwert</span> <b id="best" class="meta-v">–</b></span>
+            </div>
+
+            <div id="message" class="message" aria-live="polite"></div>
+          </div>
+
+          <div id="actions" class="actions"></div>
+
+          <div class="play-foot">
+            <p id="setup-hint" class="hint">Handy windgeschützt und ungefähr mittig zwischen euch ablegen. Mikrofon freilassen.</p>
+            <p id="wake-hint" class="hint hint-strong" hidden>Bildschirm während des Spiels eingeschaltet lassen.</p>
+            <button id="open-adjust" class="btn btn-quiet" type="button">Anpassen</button>
+          </div>
+        </section>
+
+        <!-- Statistik -->
+        <section id="view-stats" class="view view-stats" aria-label="Statistik" hidden>
+          <div id="live-bar" class="live-bar" hidden>
+            <span class="live-dot" aria-hidden="true"></span>
+            <span class="live-text"><b id="live-hits">0</b> Schläge · <span id="live-time">0:00</span> · <span id="live-state">zählt</span></span>
+            <button id="live-stop" class="btn btn-stop btn-small" type="button">Stopp</button>
+          </div>
+
+          <div id="stats-banners" class="banners"></div>
+
+          <div class="stats-head">
+            <h1 class="h1">Statistik</h1>
+            <div class="segmented" role="group" aria-label="Zeitraum">
+              <button type="button" class="seg" data-range="today" aria-pressed="true">Heute</button>
+              <button type="button" class="seg" data-range="all" aria-pressed="false">Alle</button>
+            </div>
+          </div>
+
+          <dl class="kpis">
+            <div class="kpi"><dt>Spiele</dt><dd id="kpi-count">0</dd></div>
+            <div class="kpi"><dt>Schläge insgesamt</dt><dd id="kpi-total">0</dd></div>
+            <div class="kpi"><dt>Bestes Spiel</dt><dd id="kpi-best">–</dd></div>
+            <div class="kpi"><dt>Ø pro Spiel</dt><dd id="kpi-avg">–</dd></div>
+          </dl>
+
+          <section class="card chart-card" aria-labelledby="chart-title">
+            <h2 id="chart-title" class="h2">Schläge je Spiel</h2>
+            <div id="chart" class="chart"></div>
+            <p id="chart-empty" class="empty">Starte dein erstes Spiel – hier entsteht euer Verlauf.</p>
+            <div id="chart-detail" class="chart-detail" aria-live="polite"></div>
+            <p id="chart-tip" class="tip">Tippe auf einen Punkt für Details.</p>
+          </section>
+
+          <section class="games" aria-labelledby="list-title">
+            <h2 id="list-title" class="h2">Spiele</h2>
+            <ol id="game-list" class="game-list"></ol>
+            <button id="more" class="btn btn-quiet" type="button" hidden>Weitere Spiele laden</button>
+          </section>
+
+          <p class="note">Spiele werden in diesem Browser gespeichert. Beim Löschen der Website-Daten geht der Verlauf verloren.</p>
+        </section>
+      </main>
+
+      <!-- Anpassen -->
+      <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+      <section id="adjust-sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
+        <div class="sheet-head">
+          <h2 id="sheet-title" class="h2">Anpassen</h2>
+          <button id="close-adjust" class="btn btn-quiet btn-small" type="button">Fertig</button>
+        </div>
+
+        <div class="sheet-body">
+          <div class="group">
+            <div class="group-title">Zähler korrigieren <span id="adjust-target" class="muted"></span></div>
+            <div class="stepper">
+              <button id="minus" class="btn btn-step" type="button" aria-label="Einen Schlag abziehen">−1</button>
+              <output id="adjust-value" class="stepper-value">0</output>
+              <button id="plus" class="btn btn-step" type="button" aria-label="Einen Schlag hinzufügen">+1</button>
+            </div>
+          </div>
+
+          <div class="group">
+            <label class="group-title" for="sensitivity">Empfindlichkeit <span id="sens-value" class="muted"></span></label>
+            <input id="sensitivity" class="range" type="range" min="1" max="10" step="1" value="6" />
+            <div class="range-labels"><span>Weniger Fehlzählungen</span><span>Leisere Schläge</span></div>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Umgebung</div>
+            <button id="recalibrate" class="btn btn-secondary" type="button">Neu kalibrieren</button>
+            <p id="cal-status" class="small muted"></p>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Schlagtest</div>
+            <p class="small">Macht 5 einzelne Schläge mit kurzer Pause. Der Test zählt nicht fürs Spiel.</p>
+            <div id="test-box" class="test-box" hidden>
+              <span id="test-count" class="test-count">0</span>
+              <span id="test-label" class="test-label">von 5 erkannt</span>
+            </div>
+            <p id="test-advice" class="small" hidden></p>
+            <button id="test-toggle" class="btn btn-secondary" type="button">Schlagtest starten</button>
+            <button id="test-resume" class="btn btn-primary" type="button" hidden>Spiel fortsetzen</button>
+          </div>
+
+          <div class="group">
+            <div class="group-title">Mikrofon</div>
+            <button id="mic-toggle" class="btn btn-secondary" type="button">Mikrofon testen</button>
+            <div id="meter" class="meter" hidden>
+              <div class="meter-track"><div id="meter-fill" class="meter-fill"></div><div id="meter-floor" class="meter-floor"></div></div>
+              <p class="small muted">Live-Pegel aus dem Mikrofon. Klopfen oder klatschen sollte den Balken deutlich ausschlagen lassen.</p>
+            </div>
+            <details class="tech">
+              <summary>Technische Angaben</summary>
+              <dl id="tech-list" class="tech-list"></dl>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <nav class="tabbar" aria-label="Ansichten">
+        <button type="button" class="tab" data-view="play" aria-current="page">Spielen</button>
+        <button type="button" class="tab" data-view="stats">Statistik</button>
+      </nav>
+    </div>
+  </body>
+</html>
